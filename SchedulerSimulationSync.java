@@ -5,6 +5,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.locks.ReentrantLock;
 // TODO (Feature 1 and Feature 2): import java.util.concurrent.locks.ReentrantLock;
 // TODO (Feature 3):               import java.util.concurrent.Semaphore;
@@ -152,6 +153,9 @@ class ReadyQueue {
     private final ReentrantLock queueLock = new ReentrantLock();
 
     // TODO Feature 3: declare the counting semaphore that counts the processes waiting in the ready queue here
+    // Counting semaphore to track available processes in the queue
+    private final Semaphore semaphore = new Semaphore(0);
+
     // Add a process to the ready queue (new process, or a process that did not finish its quantum)
     public void add(Process process) {
         // TODO Feature 1: protect this critical section
@@ -163,6 +167,9 @@ class ReadyQueue {
             map.put(thread, process);
 
             // TODO Feature 3: signal that one more process is available in the queue
+            // Signal that one more process is available
+            semaphore.release();
+
             System.out.println(Colors.BLUE + "  ➕ " + Colors.BOLD + Colors.CYAN + process.getName() + Colors.RESET
                     + Colors.BLUE + " (Priority: " + process.getPriority() + ") added to ready queue" + Colors.RESET
                     + " │ Remaining: " + Colors.YELLOW + process.getRemainingTime() + "ms" + Colors.RESET
@@ -175,6 +182,14 @@ class ReadyQueue {
 
     // Remove and return the thread at the head of the queue (or null if the queue is empty)
     public Thread poll() {
+        // TODO Feature 3: replace this polling loop by a blocking wait on the counting semaphore
+        try {
+            semaphore.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+
         // TODO Feature 1: protect this critical section
         // Acquire lock before polling the queue
         queueLock.lock();
@@ -222,6 +237,11 @@ class ReadyQueue {
             // Always release lock in finally block
             queueLock.unlock();
         }
+    }
+
+    // Wake up all CPUs blocked on the semaphore for clean shutdown
+    public void wakeupAllCPUs() {
+        semaphore.release(SharedStats.totalCPUs);
     }
 }
 
@@ -348,14 +368,6 @@ class CpuWorker extends Thread {
             // TODO Feature 3: replace this polling loop by a blocking wait on the counting semaphore
             Thread thread = readyQueue.poll();
             if (thread == null) {
-                // ⚠️ BUSY WAITING: the CPU keeps checking an empty queue instead of sleeping until
-                // a process is available. It wastes CPU time and needs the "completed == total" test above to stop.
-                SharedStats.busyWaitPolls.incrementAndGet();      // (counted for the verification block)
-                try {
-                    Thread.sleep(20);
-                } catch (InterruptedException e) {
-                    return;
-                }
                 continue;
             }
 
@@ -374,10 +386,13 @@ class CpuWorker extends Thread {
 
             if (!process.isFinished()) {
                 readyQueue.add(process);         // not finished: back to the ready queue
+            } else {
+                // TODO Feature 3: when the LAST process has completed, wake up the CPUs that are blocked on the
+                // semaphore so that they can terminate (otherwise they would wait forever!)
+                if (SharedStats.getCompletedProcessCount() == SharedStats.totalProcesses) {
+                    readyQueue.wakeupAllCPUs();
+                }
             }
-
-            // TODO Feature 3: when the LAST process has completed, wake up the CPUs that are blocked on the
-            // semaphore so that they can terminate (otherwise they would wait forever!)
         }
     }
 }
@@ -501,7 +516,7 @@ public class SchedulerSimulationSync {
                 ? Colors.BOLD + Colors.BRIGHT_GREEN + "  ✔ All shared values are consistent." + Colors.RESET
                 : Colors.BOLD + Colors.RED + "  ✘ At least one check failed (see the ✘ lines above): a race condition or busy waiting is still present." + Colors.RESET);
 
-        System.out.println("\n" + Colors.BOLD + Colors.BRIGHT_CYAN + "═══ Process Summary Table (nominal ms) ═══" + Colors.RESET);
+        System.out.println("\n" + Colors.BOLD + Colors.BRIGHT_CYAN + "═══ Process Summary Table (nominalms) ═══" + Colors.RESET);
         System.out.println(Colors.BOLD + String.format("%-9s %-9s %-11s %-13s %-13s", "Process", "Priority", "Burst", "Waiting", "Turnaround") + Colors.RESET);
         System.out.println("─".repeat(58));
         for (Process p : processes) {
